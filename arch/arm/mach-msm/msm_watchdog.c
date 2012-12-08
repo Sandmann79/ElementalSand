@@ -167,6 +167,8 @@ uint32_t mpm_get_timetick(void)
 static int pet_check_counter = PET_CHECK_THRESHOLD;
 static unsigned long long last_pet_check;
 
+//extern void show_pending_work_on_gcwq(void);
+
 void msm_watchdog_check_pet(unsigned long long timestamp)
 {
 	if (!enable || !msm_tmr0_base || !check_WDT_EN_footprint())
@@ -180,6 +182,7 @@ void msm_watchdog_check_pet(unsigned long long timestamp)
 			pr_info("%s: Prepare to dump stack...\n",
 				__func__);
 			dump_stack();
+//			show_pending_work_on_gcwq();
 			pr_info("\n ### Show Blocked State ###\n");
 			show_state_filter(TASK_UNINTERRUPTIBLE);
 		}
