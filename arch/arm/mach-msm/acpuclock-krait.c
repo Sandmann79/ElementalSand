@@ -154,6 +154,12 @@ static int __init get_uv_level(char *vdd_uv)
 		uv_bin = 2;
 	} else if (strcmp(vdd_uv, "3") == 0) {
 		uv_bin = 3;
+	} else if (strcmp(vdd_uv, "4") == 0) {
+		uv_bin = 4;
+	} else if (strcmp(vdd_uv, "5") == 0) {
+		uv_bin = 5;
+	} else if (strcmp(vdd_uv, "6") == 0) {
+		uv_bin = 6;
 	} else {
 		uv_bin = 0;
 	}
@@ -1123,13 +1129,28 @@ static void krait_apply_vmin(struct acpu_level *tbl)
 
 static void apply_undervolting(struct acpu_level *tbl)
 {
-	if (uv_bin == 3) {
+	if (uv_bin == 6) {
+		tbl[0].vdd_core = 725000;
+	        printk(KERN_INFO "[elementalx]: min_voltage='%i'\n", tbl[0].vdd_core );
+	}
+
+	if (uv_bin == 5) {
 		tbl[0].vdd_core = 750000;
 	        printk(KERN_INFO "[elementalx]: min_voltage='%i'\n", tbl[0].vdd_core );
 	}
 
-	if (uv_bin == 2) {
+	if (uv_bin == 4) {
+		tbl[0].vdd_core = 775000;
+	        printk(KERN_INFO "[elementalx]: min_voltage='%i'\n", tbl[0].vdd_core );
+	}
+
+	if (uv_bin == 3) {
 		tbl[0].vdd_core = 800000;
+	        printk(KERN_INFO "[elementalx]: min_voltage='%i'\n", tbl[0].vdd_core );
+	}
+
+	if (uv_bin == 2) {
+		tbl[0].vdd_core = 825000;
 	        printk(KERN_INFO "[elementalx]: min_voltage='%i'\n", tbl[0].vdd_core );
 	}
 
