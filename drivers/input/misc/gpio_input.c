@@ -262,7 +262,7 @@ static void clear_hw_reset(void);
 
 static void power_key_restart_work_func(struct work_struct *dummy)
 {
-	int pocket_mode = power_key_check_in_pocket();
+	int pocket_mode = power_key_check_in_pocket(1);
 
 	printk(KERN_INFO "%s: power_key_check_in_pocket = %d\n", __func__, pocket_mode);
 	if (!pocket_mode && pre_power_key_led_status == 1) {
@@ -344,7 +344,7 @@ static void power_key_check_reset_work_func(struct work_struct *dummy)
 	KEY_LOGI("[PWR] %s\n", __func__);
 	if ((aa->clear_hw_reset)) {
 		
-		pocket_mode = power_key_check_in_pocket();
+		pocket_mode = power_key_check_in_pocket(1);
 		if (pocket_mode) {
 			printk(KERN_INFO "[KEY] power_key_check_in_pocket = %d\n", pocket_mode);
 			aa->clear_hw_reset();

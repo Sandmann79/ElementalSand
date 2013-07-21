@@ -34,7 +34,12 @@
 #include <linux/input/mt.h>
 #include <linux/pl_sensor.h>
 #include <linux/async.h>
-#include <linux/mfd/pm8xxx/vibrator.h> 
+
+#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
+#include <linux/ctype.h>
+#include <linux/mfd/pm8xxx/vibrator.h>
+#include <linux/pl_sensor.h>
+#endif
 
 #define SYN_I2C_RETRY_TIMES 8
 #define SHIFT_BITS 10
@@ -166,7 +171,7 @@ int s2w_switch = 1;
 int l2m_switch = 1;
 int l2w_switch = 0;
 int dt2w_switch = 1;
-int pocket_detect = 1;
+int pocket_detect = 1; // 1 -> pocket wake protection on, 2 -> pocket wake protection with only near check , no dark check ;  0 - off
 int s2w_hist[2] = {0, 0};
 cputime64_t s2w_time[3] = {0, 0, 0};
 int l2m_hist[2] = {0, 0};
@@ -221,8 +226,8 @@ static void sweep2wake_presspwr(struct work_struct * sweep2wake_presspwr_work) {
 
 	reset_sweep2wake();
 
-	if (scr_suspended == true && pocket_detect == 1)
-		pocket_mode = power_key_check_in_pocket();
+	if (scr_suspended == true && pocket_detect >= 1)
+		pocket_mode = power_key_check_in_pocket((pocket_detect == 1)?1:0);
 
 	if (l2w_switch == 1)
 		break_longtap_count = 1;
@@ -320,8 +325,8 @@ static void logo2wake_longtap_count(struct work_struct * logo2wake_longtap_count
 
 		// printk(KERN_INFO "[L2W] sending event KEY_POWER 1\n");
 
-		if (pocket_detect == 1)
-			pocket_mode = power_key_check_in_pocket();
+		if (pocket_detect >= 1)
+			pocket_mode = power_key_check_in_pocket((pocket_detect == 1)?1:0);
 
 		if (!pocket_mode || pocket_detect == 0) {
 			vibrate(vib_strength);
@@ -404,6 +409,8 @@ static int __init get_pocket_detect_opt(char *pd)
 		pocket_detect = 0;
 	} else if (strcmp(pd, "1") == 0) {
 		pocket_detect = 1;
+	} else if (strcmp(pd, "2") == 0) {
+		pocket_detect = 2;
 	} else {
 		pocket_detect = 0;
 	}
@@ -1736,9 +1743,16 @@ static ssize_t synaptics_pocket_detect_show(struct device *dev, struct device_at
 
 static ssize_t synaptics_pocket_detect_dump(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
-	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
+	if (buf[0] >= '0' && buf[0] <= '2' && buf[1] == '\n')
                 if (pocket_detect != buf[0] - '0')
 		        pocket_detect = buf[0] - '0';
+
+	if (pocket_detect == 0) 
+		printk(KERN_INFO "[POCKETWAKEPROT]: Disabled.\n");
+	else if (pocket_detect == 1)
+		printk(KERN_INFO "[POCKETWAKEPROT]: Enabled with Dark + Near detection.\n");
+	else if (pocket_detect == 2)
+		printk(KERN_INFO "[POCKETWAKEPROT]: Enabled with only Near detection.\n");
 
 	return count;
 }

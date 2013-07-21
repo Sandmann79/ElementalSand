@@ -2386,7 +2386,7 @@ err_free_ps_input_device:
 	return ret;
 }
 
-int power_key_check_in_pocket(void)
+int power_key_check_in_pocket(int check_dark)
 {
 	struct cm3629_info *lpi = lp_info;
 	int ls_dark;
@@ -2426,7 +2426,7 @@ int power_key_check_in_pocket(void)
 
 	D("[cm3629] %s --- ls_dark %d\n", __func__, ls_dark);
 	pocket_mode_flag = 0;
-	return (ls_dark && ps_near);
+	return ((check_dark && ls_dark && ps_near) || (!check_dark && ps_near));
 }
 
 int psensor_enable_by_touch_driver(int on)
