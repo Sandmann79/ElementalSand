@@ -157,6 +157,7 @@ extern uint8_t touchscreen_is_on(void)
 
 #ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
 int button_id = 0;
+int home_back_home = 0;
 int cancel_pwrtrigger = 0;
 int s2w_switch = 1;
 int l2m_switch = 1;
@@ -203,6 +204,8 @@ static void reset_sweep2wake (void) {
 
         s2w_hist[0] = 0;
         s2w_hist[1] = 0;
+
+	home_back_home = 0;
 }
 
 extern void sweep2wake_setdev(struct input_dev * input_device) {
@@ -249,10 +252,11 @@ void sweep2wake_pwrtrigger(void) {
 
 	printk("[S2W] pwrtrigger2=%llu pwrtrigger1=%llu\n ", pwrtrigger_time[1], pwrtrigger_time[0]);
 
-	if (pwrtrigger_time[0] - pwrtrigger_time[1] < S2W_TIMEOUT3) {
+	if ((pwrtrigger_time[0] - pwrtrigger_time[1] < S2W_TIMEOUT3) && !home_back_home) {
 		printk("not enough time\n");
 		return;
 	}
+
 	if (!cancel_pwrtrigger)
 		schedule_work(&sweep2wake_presspwr_work);
 
@@ -2112,6 +2116,7 @@ static void sweep2wake_func(int button_id, cputime64_t strigger_time) {
 		if (s2w_switch == 1 && (s2w_hist[1] == 1 && s2w_hist[0] == 2)) {
                         	printk("[S2W]: OFF->ON\n");
 				wakesleep_vib = 1;
+				home_back_home = 1;
 				cancel_pwrtrigger = 0;
                         	sweep2wake_pwrtrigger();
 				return;
