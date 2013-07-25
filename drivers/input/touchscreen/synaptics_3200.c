@@ -178,11 +178,11 @@ cputime64_t pwrtrigger_time[2] = {0, 0};
 int wakesleep_vib = 0;
 int vib_strength = 15;
 static int break_longtap_count = 0;
-int button_timeout = 6;
-#define S2W_START 60
+int button_timeout = 5;
+#define S2W_START 20
 #define S2W_TIMEOUT 350
 #define S2W_TIMEOUT2 600
-#define S2W_TIMEOUT3 800
+#define S2W_TIMEOUT3 700
 #define L2M_TIMEOUT 300
 #define DT2W_TIMEOUT_MAX 300
 #define DT2W_TIMEOUT_MIN 150
@@ -2153,7 +2153,7 @@ static void sweep2wake_func(int button_id, cputime64_t strigger_time) {
 
 		} else if ((s2w_hist[1] == 2 && s2w_hist[0] == 1) && !scr_suspended) {
 	            printk("[S2W]: ON->OFF\n");
-				wakesleep_vib = 1;
+				//wakesleep_vib = 1;
 				cancel_pwrtrigger = 0;
 				sweep2wake_pwrtrigger();
 				return;
