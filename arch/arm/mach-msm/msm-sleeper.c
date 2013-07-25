@@ -18,6 +18,7 @@
 #include <linux/cpu.h>
 #include <linux/module.h>
 #include <linux/cpufreq.h>
+#include <mach/cpufreq.h>
 
 #define MSM_SLEEPER_MAJOR_VERSION	1
 #define MSM_SLEEPER_MINOR_VERSION	1
@@ -30,24 +31,43 @@ uint32_t old_max = 0;
 #ifdef CONFIG_HAS_EARLYSUSPEND
 static void __cpuinit msm_sleeper_early_suspend(struct early_suspend *h)
 {
-	struct cpufreq_policy *policy;
+//	struct cpufreq_policy *policy;
+//	if (maxscroff) {
+//		policy = cpufreq_cpu_get(0);
+//		old_max = policy->max;
+//		policy->max = maxscroff_freq;
+//		printk(KERN_INFO "[msm-sleeper]: Limited freq to '%u'\n", maxscroff_freq);
+//	}
 
-	if (maxscroff) {
-		policy = cpufreq_cpu_get(0);
-		old_max = policy->max;
-		policy->max = maxscroff_freq;
-		printk(KERN_INFO "[msm-sleeper]: Limited freq to '%u'\n", maxscroff_freq);
-	}
+  int cpu;
+
+  for_each_possible_cpu(cpu) {
+    msm_cpufreq_set_freq_limits(cpu, MSM_CPUFREQ_NO_LIMIT, maxscroff_freq);
+          pr_info("Cpulimit: Early suspend - limit max frequency to: %d\n", maxscroff_freq);
+      }
+  return; 
+
+
+
 }
 
 static void __cpuinit msm_sleeper_late_resume(struct early_suspend *h)
 {
-	struct cpufreq_policy *policy;
-	if (maxscroff) {
-		policy = cpufreq_cpu_get(0);
-		policy->max = old_max;
-		printk(KERN_INFO "[msm-sleeper]: Restoring freq to '%u'\n", old_max);
-	}
+//	struct cpufreq_policy *policy;
+//	if (maxscroff) {
+//		policy = cpufreq_cpu_get(0);
+//		policy->max = old_max;
+//		printk(KERN_INFO "[msm-sleeper]: Restoring freq to '%u'\n", old_max);
+//	}
+
+  int cpu;
+
+  for_each_possible_cpu(cpu) {
+    msm_cpufreq_set_freq_limits(cpu, MSM_CPUFREQ_NO_LIMIT, MSM_CPUFREQ_NO_LIMIT);
+          pr_info("Cpulimit: Late resume - restore max frequency.\n");
+      }
+  return; 
+
 }
 
 static struct early_suspend msm_sleeper_early_suspend_driver = {

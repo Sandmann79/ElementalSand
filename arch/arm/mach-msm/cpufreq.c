@@ -37,7 +37,7 @@
 #endif
 
 /* maxscroff */
-uint32_t maxscroff_freq = 486000;
+uint32_t maxscroff_freq = 702000;
 uint32_t maxscroff = 0;
 
 #ifdef CONFIG_SMP
