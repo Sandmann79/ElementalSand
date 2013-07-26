@@ -1716,6 +1716,12 @@ config MSM_CPU_FREQ_MIN
 
 endif # CPU_FREQ_MSM
 
+config CPU_OVERCLOCK
+	bool "Enable CPU Overclocking option"
+	default n
+	help
+	  Krait overclocking up to 2.1 GHz
+
 config MSM_SLEEPER
 	bool "Limit max frequency and shut off cores while screen is off"
 	default n
