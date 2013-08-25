@@ -546,7 +546,7 @@ static void tz_idle(struct kgsl_device *device, struct kgsl_pwrscale *pwrscale)
 	if (priv->governor == TZ_GOVERNOR_SIMPLE)
 		val = simple_governor(device, idle);
 	else
-		val = __secure_tz_entry(TZ_UPDATE_ID, idle, device->id);
+		val = __secure_tz_entry(TZ_UPDATE_ID, idle, total_time);
 #else
 	val = __secure_tz_entry(TZ_UPDATE_ID, idle, total_time);
 #endif
