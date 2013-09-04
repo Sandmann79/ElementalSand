@@ -178,7 +178,7 @@ cputime64_t pwrtrigger_time[2] = {0, 0};
 int wakesleep_vib = 0;
 int vib_strength = 15;
 static int break_longtap_count = 0;
-int button_timeout = 6;
+int button_timeout = 4;
 #define S2W_START 30
 #define S2W_TIMEOUT 350
 #define S2W_TIMEOUT2 600
