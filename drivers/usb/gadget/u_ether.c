@@ -84,6 +84,7 @@ static inline int qlen(struct usb_gadget *gadget)
 
 
 
+#ifdef DEBUG
 #undef DBG
 #undef VDBG
 #undef ERROR
@@ -112,6 +113,7 @@ static inline int qlen(struct usb_gadget *gadget)
 	xprintk(dev , KERN_ERR , fmt , ## args)
 #define INFO(dev, fmt, args...) \
 	xprintk(dev , KERN_INFO , fmt , ## args)
+#endif 
 
 static struct eth_dev *the_dev;
 
