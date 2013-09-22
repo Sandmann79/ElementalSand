@@ -68,6 +68,7 @@ struct synaptics_ts_data {
 	struct early_suspend early_suspend;
 	int pre_finger_data[11][4];
 	uint32_t debug_log_level;
+	uint32_t enable_noise_log;
 	uint32_t raw_base;
 	uint32_t raw_ref;
 	uint64_t timestamp;
@@ -2272,16 +2273,29 @@ static void dt2w_func(int x, int y, cputime64_t trigger_time) {
 static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 {
 	int ret;
-	uint8_t buf[((ts->finger_support * 21 + 3) / 4)];
-        cputime64_t dt_trigger_time;
+	uint8_t buf[ts->finger_support * 8 ], noise_index[10], noise_state = 0;
+	static int x_pos[10] = {0}, y_pos[10] = {0};
+	cputime64_t dt_trigger_time;
 
 	memset(buf, 0x0, sizeof(buf));
+	memset(noise_index, 0x0, sizeof(noise_index));
 	if (ts->package_id < 3400)
 		ret = i2c_syn_read(ts->client,
 			get_address_base(ts, 0x01, DATA_BASE) + 2, buf, sizeof(buf));
-	else
+	else {
 		ret = i2c_syn_read(ts->client,
 			get_address_base(ts, ts->finger_func_idx, DATA_BASE), buf, sizeof(buf));
+		ret = i2c_syn_read(ts->client,
+			get_address_base(ts, 0x54, DATA_BASE) + 8, &noise_state, 1);
+		if (noise_state == 2) {
+			ret = i2c_syn_read(ts->client,
+				get_address_base(ts, 0x54, DATA_BASE) + 4, noise_index, sizeof(noise_index));
+			ts->debug_log_level |= BIT(17);
+		} else {
+			if (!ts->enable_noise_log)
+				ts->debug_log_level &= ~BIT(17);
+		}
+	}
 	if (ret < 0) {
 		i2c_syn_error_handler(ts, ts->i2c_err_handler_en, "r:1", __func__);
 	} else {
@@ -2362,13 +2376,13 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 					if(ts->width_factor && ts->height_factor){
 						printk(KERN_INFO
 							"[TP] Screen:F[%02d]:Up, X=%d, Y=%d, W=%d, Z=%d\n",
-							i+1, (finger_data[i][0]*ts->width_factor)>>SHIFT_BITS,
-							(finger_data[i][1]*ts->height_factor)>>SHIFT_BITS,
+							i+1, (x_pos[i]*ts->width_factor)>>SHIFT_BITS,
+							(y_pos[i]*ts->height_factor)>>SHIFT_BITS,
 							finger_data[i][2], finger_data[i][3]);
 					} else {
 						printk(KERN_INFO
 							"[TP] Raw:F[%02d]:Up, X=%d, Y=%d, W=%d, Z=%d\n",
-							i+1, finger_data[i][0], finger_data[i][1],
+							i+1, x_pos[i], y_pos[i],
 							finger_data[i][2], finger_data[i][3]);
 					}
 				}
@@ -2476,7 +2490,7 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 							if (ts->finger_count == 0)
 								ts->first_pressed = 1;
 							printk(KERN_INFO "[TP1] E%d@%d, %d\n", i + 1,
-							finger_data[i][0], finger_data[i][1]);
+							x_pos[i], y_pos[i]);
 						}
 					}
 #ifdef SYN_FILTER_CONTROL
@@ -2514,7 +2528,7 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 								ts->tap_suppression &= ~BIT(i);
 							} else {
 								finger_pressed &= ~BIT(i);
-								if (ts->debug_log_level & (BIT(1) | BIT(3)))
+								if (ts->debug_log_level & BIT(1))
 									printk(KERN_INFO
 										"[TP2] Filtered Finger %d=> X:%d, Y:%d w:%d, z:%d\n",
 										i + 1, finger_data[i][0], finger_data[i][1],
@@ -2577,11 +2591,8 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 									(finger_pressed == 0) << 31 |
 									finger_data[i][0] << 16 | finger_data[i][1]);
 							}
-#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
-							last_touch_position_x = finger_data[i][0];
-							last_touch_position_y = finger_data[i][1];
-							if (!report_htc_logo_area(last_touch_position_x,last_touch_position_y)) {
-#endif 
+
+
 								input_mt_slot(ts->input_dev, i);
 								input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER,
 								1);
@@ -2622,7 +2633,8 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 						   }							
 #endif 
 						}
-
+						x_pos[i] = finger_data[i][0];
+						y_pos[i] = finger_data[i][1];
 						finger_pressed &= ~BIT(i);
 
 						if ((finger_press_changed & BIT(i)) && ts->debug_log_level & BIT(3)) {
@@ -2680,9 +2692,15 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 
 						if (ts->debug_log_level & BIT(1))
 							printk(KERN_INFO
-								"[TP3] Finger %d=> X:%d, Y:%d w:%d, z:%d\n",
+								"[TP3] Finger %d=> X:%d, Y:%d W:%d, Z:%d\n",
 								i + 1, finger_data[i][0], finger_data[i][1],
 								finger_data[i][2], finger_data[i][3]);
+						if (ts->debug_log_level & BIT(17))
+							printk(KERN_INFO
+								"[TP] Finger %d=> X:%d, Y:%d W:%d, Z:%d, IM:%d, CIDIM:%d, Freq:%d, NS:%d\n",
+								i + 1, finger_data[i][0], finger_data[i][1], finger_data[i][2],
+								finger_data[i][3], noise_index[1] | noise_index[0],
+								noise_index[6] | noise_index[5], noise_index[9], noise_index[4]);
 					}
 					if (ts->packrat_number < SYNAPTICS_FW_NOCAL_PACKRAT) {
 #ifdef SYN_CALIBRATION_CONTROL

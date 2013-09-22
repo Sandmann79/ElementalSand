@@ -166,6 +166,7 @@ static struct usb_cdc_union_desc ncm_union_desc __initdata = {
 	/* .bSlaveInterface0 =	DYNAMIC */
 };
 
+#ifndef CONFIG_USB_ANDROID_ECM
 static struct usb_cdc_ether_desc ecm_desc __initdata = {
 	.bLength =		sizeof ecm_desc,
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
@@ -178,6 +179,7 @@ static struct usb_cdc_ether_desc ecm_desc __initdata = {
 	.wNumberMCFilters =	cpu_to_le16(0),
 	.bNumberPowerFilters =	0,
 };
+#endif
 
 #define NCAPS	(USB_CDC_NCM_NCAP_ETH_FILTER | USB_CDC_NCM_NCAP_CRC_MODE)
 
@@ -533,22 +535,16 @@ static void ncm_notify(struct f_ncm *ncm)
 static void ncm_notify_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct f_ncm			*ncm = req->context;
-	struct usb_composite_dev	*cdev = ncm->port.func.config->cdev;
-	struct usb_cdc_notification	*event = req->buf;
 
 	spin_lock(&ncm->lock);
 	switch (req->status) {
 	case 0:
-		VDBG(cdev, "Notification %02x sent\n",
-		     event->bNotificationType);
 		break;
 	case -ECONNRESET:
 	case -ESHUTDOWN:
 		ncm->notify_state = NCM_NOTIFY_NONE;
 		break;
 	default:
-		DBG(cdev, "event %02x --> %d\n",
-			event->bNotificationType, req->status);
 		break;
 	}
 	ncm->notify_req = req;
@@ -562,23 +558,19 @@ static void ncm_ep0out_complete(struct usb_ep *ep, struct usb_request *req)
 	unsigned		in_size;
 	struct usb_function	*f = req->context;
 	struct f_ncm		*ncm = func_to_ncm(f);
-	struct usb_composite_dev *cdev = ep->driver_data;
 
 	req->context = NULL;
 	if (req->status || req->actual != req->length) {
-		DBG(cdev, "Bad control-OUT transfer\n");
 		goto invalid;
 	}
 
 	in_size = get_unaligned_le32(req->buf);
 	if (in_size < USB_CDC_NCM_NTB_MIN_IN_SIZE ||
 	    in_size > le32_to_cpu(ntb_parameters.dwNtbInMaxSize)) {
-		DBG(cdev, "Got wrong INPUT SIZE (%d) from host\n", in_size);
 		goto invalid;
 	}
 
 	ncm->port.fixed_in_len = in_size;
-	VDBG(cdev, "Set NTB INPUT SIZE %d\n", in_size);
 	return;
 
 invalid:
@@ -1086,9 +1078,6 @@ err:
 static void ncm_disable(struct usb_function *f)
 {
 	struct f_ncm		*ncm = func_to_ncm(f);
-	struct usb_composite_dev *cdev = f->config->cdev;
-
-	DBG(cdev, "ncm deactivated\n");
 
 	if (ncm->port.in_ep->driver_data)
 		gether_disconnect(&ncm->port);
@@ -1299,7 +1288,7 @@ ncm_unbind(struct usb_configuration *c, struct usb_function *f)
  * Caller must have called @gether_setup().  Caller is also responsible
  * for calling @gether_cleanup() before module unload.
  */
-int __init ncm_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN])
+int ncm_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN])
 {
 	struct f_ncm	*ncm;
 	int		status;

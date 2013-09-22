@@ -763,7 +763,7 @@ static void insert_work(struct cpu_workqueue_struct *cwq,
 			struct work_struct *work, struct list_head *head,
 			unsigned int extra_flags)
 {
-	struct global_cwq *gcwq = cwq->gcwq;
+	struct worker_pool *pool = cwq->pool;
 
 	
 	set_work_cwq(work, cwq, extra_flags);
