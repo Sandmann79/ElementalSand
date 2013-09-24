@@ -22,6 +22,14 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
+
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+#include <linux/jiffies.h>
+#include <linux/pl_sensor.h>
+#include <linux/synaptics_i2c_rmi.h>
+#include <linux/mfd/pm8xxx/vibrator.h>
+#endif
+
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/earlysuspend.h>
 #endif
@@ -83,6 +91,21 @@ static void bma250_early_suspend(struct early_suspend *h);
 static void bma250_late_resume(struct early_suspend *h);
 #endif
 
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+// flick of the phone wakes/sleeps the phone
+static int FLICK_WAKE_ENABLED = 1;
+static int FLICK_SLEEP_ENABLED = 1;
+static int FLICK_WAKE_SENSITIVITY = 1; // 0-1, 0 less sensitive, 1 more sensible
+// if phone has been laying around on the table (horizontal still), and gyro turns to mostly vertical for a bit of time, wake phone
+static int PICK_WAKE_ENABLED = 0;
+static int suspended = 1;
+
+static int keep_sensor_on(void)
+{
+	return PICK_WAKE_ENABLED;
+}
+#endif
+
 static int bma250_smbus_read_byte(struct i2c_client *client,
 		unsigned char reg_addr, unsigned char *data)
 {
@@ -125,7 +148,11 @@ static int bma250_set_mode(struct i2c_client *client, unsigned char Mode)
 	    return 0;
 	} else {
 #endif
-
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	if (keep_sensor_on() && Mode != BMA250_MODE_NORMAL) {
+	    return 0;
+	}
+#endif
 	if (Mode < 3) {
 		comres = bma250_smbus_read_byte(client,
 				BMA250_EN_LOW_POWER__REG, &data1);
@@ -1464,6 +1491,373 @@ static int bma250_read_accel_xyz(struct i2c_client *client,
 	return comres;
 }
 
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+
+static DEFINE_MUTEX(pwrlock);
+static DEFINE_MUTEX(picklock);
+static struct input_dev * flick2wake_pwrdev;
+
+extern void flick2wake_setdev(struct input_dev * input_device) {
+        flick2wake_pwrdev = input_device;
+        return;
+}
+EXPORT_SYMBOL(flick2wake_setdev);
+
+static void flick2wake_presspwr(struct work_struct * flick2wake_presspwr_work) {
+	if ( touchscreen_is_on()==0 && power_key_check_in_pocket(1) ) return; // don't wake if in pocket
+
+	if (!mutex_trylock(&pwrlock))
+	    return;
+
+	vibrate(5 * 5);
+
+	printk("sending event KEY_POWER 1\n");
+	input_event(flick2wake_pwrdev, EV_KEY, KEY_POWER, 1);
+	input_sync(flick2wake_pwrdev);
+	msleep(100);
+	input_event(flick2wake_pwrdev, EV_KEY, KEY_POWER, 0);
+	input_sync(flick2wake_pwrdev);
+	msleep(100);
+	// to make sure it gets back to Normal mode upon power off too, set suspended = 1
+//	suspended = 1;
+	mutex_unlock(&pwrlock);
+	return;
+}
+static DECLARE_WORK(flick2wake_presspwr_work, flick2wake_presspwr);
+
+void flick2wake_pwrtrigger(void) {
+	schedule_work(&flick2wake_presspwr_work);
+	return;
+}
+
+
+// flick stuff
+static unsigned int LAST_VER_T = 0;
+static unsigned int VER_T = 0;
+static unsigned int START_T = 0;
+static unsigned int LAST_FLICK_T = 0;
+
+static s16 last_z;
+static s16 last_y;
+
+// used to calculate if enough time passed between last Power Off, and next possible power on detection from IRQ wake
+static unsigned int LAST_SLEEP_TRIGGER_T = 0;
+
+static void flick_wake_detection_snap(s16 data_x, s16 data_y, s16 data_z)
+{
+	if (PICK_WAKE_ENABLED == 0 && touchscreen_is_on()==0) return;
+
+	if (
+
+	    (FLICK_WAKE_SENSITIVITY == 0 && ((
+		(data_z > 270 || data_z < - 270 || (last_z > 260 || last_z < -260) ) &&
+		(data_y < -75 || last_y < -75)) && data_x > - 380 && data_x < 380))
+	    ||
+	    (FLICK_WAKE_SENSITIVITY == 1 && ((
+		(data_z > 250 || data_z < - 250 || (last_z > 250 || last_z < -250) ) &&
+		(data_y < -55 || last_y < -55)) && data_x > - 380 && data_x < 380))
+	) { // Y phone's standing or laying (0 degree mean laying),
+//X phone is rotated on the plane of screen or not (0 degree angle means not rotated)
+
+// z overfloated will happen on snap, so check for values below -270
+// also y overfloated will happen too, so check for values below -75
+// x can be overloaded too, check for wide range
+// checking the previous y and z overfloat is very accurate to detect snap
+
+		VER_T = jiffies;
+		if (LAST_VER_T == 0) {
+		} else
+		if ((VER_T - LAST_VER_T) < 55) {
+			printk("BMA - =============== 3 FLICK SNAP DONE - POWER OFF =====================\n");
+			LAST_FLICK_T = 0;
+			LAST_VER_T = 0;
+			LAST_SLEEP_TRIGGER_T = jiffies;
+			flick2wake_pwrtrigger();
+		} else {
+			printk("BMA - == TIMED OUT: RESET ==\n");
+			LAST_FLICK_T = 0;
+			LAST_VER_T = 0;
+			START_T = 0;
+		}
+	} else if (data_y > 110 && data_y < 260 && data_x > - 110 && data_x < 110) {
+		VER_T = jiffies;
+		{
+			printk("BMA - =============== 1 FLICK POSSIBLE ================\n");
+			LAST_VER_T = VER_T;
+			START_T = jiffies;
+		}
+	}
+	last_z = data_z;
+	last_y = data_y;
+}
+
+// used to react on snap in sleep mode, through IRQ work calling this
+static void flick_wake_detection_snap_irq(s16 data_x, s16 data_y, s16 data_z)
+{
+	if (jiffies - LAST_SLEEP_TRIGGER_T < 80) return;
+	if (touchscreen_is_on()==1) return;
+	if (1) {
+			printk("BMA - =============== 3 FLICK SNAP DONE - POWER ON =====================\n");
+			flick2wake_pwrtrigger();
+	}
+}
+
+
+// pick stuff
+static unsigned int START_LAYING_T = 0;
+static unsigned int LAST_LAYING_T = 0;
+static unsigned int LAYING_T = 0;
+static int WAS_LAYING = 0;
+static int MOVED = 1;
+static unsigned int MOVE_STARTED = 0;
+
+static unsigned int MIN_STILL_TIME_FOR_POWER_ON = 10;
+static unsigned int MIN_STILL_TIME_FOR_LAYING = 100;
+static unsigned int MAX_TIME_TO_WAIT_FOR_FACE_ALIGNMENT = 200;
+
+
+static int break_pick2wake_count = 0;
+
+static void pick2wake_count(struct work_struct * pick2wake_count_work) {
+	unsigned int time_count = 0;
+	unsigned int calc_time = 0;
+	printk("BMA pick2wake_count - check ts on and pwp...\n");
+
+	if ( touchscreen_is_on()==0 && power_key_check_in_pocket(1) ) return; // don't wake if in pocket
+
+	printk("BMA pick2wake_count\n");
+	if (!mutex_trylock(&picklock))
+	    return;
+	printk("BMA pick2wake_count inside lock\n");
+
+	time_count = jiffies;
+	while (1)
+	{
+		calc_time = jiffies - time_count;
+		printk("BMA counted time so far: %d\n",calc_time);
+		if (break_pick2wake_count == 1)
+		{
+			printk("[BMA] breaking count work...\n");
+			break_pick2wake_count = 0;
+			mutex_unlock(&picklock);
+			return;
+		}
+		if (calc_time > MIN_STILL_TIME_FOR_POWER_ON)
+		{
+			printk("[BMA] counted to time!\n");
+			break;
+		}
+		msleep(3);
+	}
+	vibrate(3 * 5);
+
+	printk("BMA - pick2wake_count sending event KEY_POWER 1\n");
+	input_event(flick2wake_pwrdev, EV_KEY, KEY_POWER, 1);
+	input_sync(flick2wake_pwrdev);
+	msleep(100);
+	input_event(flick2wake_pwrdev, EV_KEY, KEY_POWER, 0);
+	input_sync(flick2wake_pwrdev);
+	msleep(100);
+	// to make sure it gets back to Normal mode upon power off too, set suspended = 1
+//	suspended = 1;
+	mutex_unlock(&picklock);
+	return;
+}
+static DECLARE_WORK(pick2wake_count_work, pick2wake_count);
+
+void pick2wake_count_trigger(void) {
+	schedule_work(&pick2wake_count_work);
+	return;
+}
+
+static int is_laying(s16 data_x, s16 data_y, s16 data_z) {
+	if (data_x > -44 && data_x < 44 && data_y > -44 && data_y < 44 && ( (data_z > -260 && data_z < -250) || (data_z < 260 && data_z > 250) )) {
+		return 1;
+	}
+	return 0;
+}
+
+
+static s16 last_x = 0, last_y = 0, last_z = 0;
+static s16 max_delta = 10;
+static unsigned int still_time = 0;
+static unsigned int last_still_time_jiffies = 0;
+
+static int is_around(s16 old, s16 new, s16 max_delta) {
+	s16 diff = old - new;
+	if (diff < 0) diff = diff * -1;
+	if (diff <= max_delta) return 1;
+	return 0;
+}
+
+static unsigned int calculate_still_time(s16 data_x, s16 data_y, s16 data_z) {
+	unsigned int curr_jiffies = jiffies;
+	int is_still = 0;
+	if (still_time == 0) {
+		last_still_time_jiffies = jiffies;
+		still_time = 1;
+		last_x = data_x;
+		last_y = data_y;
+		last_z = data_z;
+		return still_time;
+	}
+	is_still = (is_around(last_x, data_x, max_delta) && is_around(last_y, data_y, max_delta) && is_around(last_z, data_z, max_delta));
+	if (is_still == 0) {
+		still_time = 0;
+		last_still_time_jiffies = 0;
+		return still_time;
+	} else {
+		still_time += curr_jiffies - last_still_time_jiffies;
+		last_still_time_jiffies = curr_jiffies;
+		return still_time;
+	}
+}
+
+
+static int is_face_aligned(s16 data_x, s16 data_y, s16 data_z) {
+	if (data_x > -120 && data_x < 120 && data_y > 60 && data_y < 270 && data_z < 270 && data_z > 0 ) {
+		return 1;
+	}
+	return 0;
+}
+
+
+static int pick_wake_triggered = 1;
+
+#if 0
+static unsigned int LAST_PICK_INTERRUPT_TIME = 0;
+static unsigned int STARTING_AFTER_LAYING_AROUND = 0;
+static unsigned int FACE_ALIGN_COUNTING = 0;
+
+static void pick_wake_detection(struct bma250_data *bma250, s16 data_x, s16 data_y, s16 data_z)
+{
+	unsigned int calc_diff = 0;
+	unsigned int still_time = 0;
+
+	if (LAST_PICK_INTERRUPT_TIME == 0) {
+		LAST_PICK_INTERRUPT_TIME = jiffies;
+		return;
+	}
+
+	if (touchscreen_is_on()==1) return;
+
+
+	if (jiffies - LAST_PICK_INTERRUPT_TIME > MIN_STILL_TIME_FOR_LAYING) {
+		if (STARTING_AFTER_LAYING_AROUND == 0) {
+			STARTING_AFTER_LAYING_AROUND = jiffies;
+		}
+		printk("BMA PICK - jiffies - LAST_PICK_INTERRUPT_TIME > MIN_STILL_TIME_FOR_LAYING)\n");
+		if (is_face_aligned(data_x, data_y, data_z)) {
+			still_time = calculate_still_time(data_x, data_y, data_z);
+			if (still_time > 0 && FACE_ALIGN_COUNTING == 0)
+			{
+				printk("BMA PICK - FACE ALIGN - starting count\n");
+				FACE_ALIGN_COUNTING = 1;
+				break_pick2wake_count = 0;
+				pick2wake_count_trigger();
+			} else 
+			{
+				printk("BMA PICK - FACE NEWLY ALIGN - restarting count\n");
+				FACE_ALIGN_COUNTING = 1;
+				break_pick2wake_count = 1;
+				msleep(5);
+				break_pick2wake_count = 1;
+				pick2wake_count_trigger();
+			}
+		} else {
+			printk("BMA PICK - NOT ALIGNED TO FACE\n");
+			FACE_ALIGN_COUNTING = 0;
+			break_pick2wake_count = 1;
+		}
+	}
+	if (FACE_ALIGN_COUNTING == 0) {
+		calc_diff = jiffies - STARTING_AFTER_LAYING_AROUND;
+		printk("BMA PICK - jiffies - STARTING_AFTER_LAYING_AROUND = %d, > %d ,\n",calc_diff, MAX_TIME_TO_WAIT_FOR_FACE_ALIGNMENT);
+		if ( STARTING_AFTER_LAYING_AROUND == 0 || (calc_diff > MAX_TIME_TO_WAIT_FOR_FACE_ALIGNMENT) ) 
+		{
+			printk("BMA PICK - LAST_PICK_INTERRUPT_TIME = jiffies,\n");
+			LAST_PICK_INTERRUPT_TIME = jiffies;
+			STARTING_AFTER_LAYING_AROUND = 0;
+		}
+	}
+}
+#endif
+
+static void pick_wake_detection_non_interrupt(struct bma250_data *bma250, s16 data_x, s16 data_y, s16 data_z)
+{
+	unsigned int still_time_detected = 0;
+	if (touchscreen_is_on()==1) {
+		// screen on, finish detection
+		START_LAYING_T = 0;
+		WAS_LAYING = 0;
+		LAST_LAYING_T = 0;
+		return;
+	}
+
+	LAYING_T = jiffies;
+	if (WAS_LAYING) {
+		if (MOVED == 0 && is_laying(data_x, data_y, data_z)) {
+			LAST_LAYING_T = LAYING_T;
+			//printk("BMA PICK - WAS_LAYING = 1, MOVED 0, STILL LAYING\n");
+		} else {
+			if (MOVED == 0) {
+			//	printk("BMA PICK - WAS_LAYING = 1, MOVED -> 1, MOVE_STARTED\n");
+				MOVED = 1;
+				MOVE_STARTED = LAYING_T;
+			} else {
+				if (LAYING_T - MOVE_STARTED > MAX_TIME_TO_WAIT_FOR_FACE_ALIGNMENT) {
+					// timeout
+			//		printk("BMA PICK - WAS_LAYING = 1, MOVE = 1, BUT TIMEOUT === RESET\n");
+					START_LAYING_T = 0;
+					WAS_LAYING = 0;
+					LAST_LAYING_T = 0;
+					MOVED = 0;
+					return;
+				}
+				if (is_face_aligned(data_x, data_y, data_z)) {
+					still_time_detected = calculate_still_time(data_x, data_y, data_z);
+			//		printk("BMA PICK - WAS_LAYING = 1, MOVED = 1, FACE ALIGN, CALC STILL TIME so far %d \n", still_time_detected);
+					if (MIN_STILL_TIME_FOR_POWER_ON < still_time_detected) {
+						if (pick_wake_triggered == 1) {
+							// already waking, don't power on a second time
+						} else
+						if (touchscreen_is_on()==0) {
+			//				printk("BMA PICK - WAS_LAYING = 1, MOVE = 1, FACE ALIGNED, ============= POWER_ON!\n");
+							pick_wake_triggered = 1;
+							flick2wake_pwrtrigger();
+						}
+					}
+				} else {
+			//		printk("BMA PICK - NOT FACE ALIGNED\n");
+				}
+			}
+		}
+	} else {
+		// check if it's laying
+		if (is_laying(data_x, data_y, data_z)) {
+			LAST_LAYING_T = LAYING_T;
+			if (START_LAYING_T == 0) {
+				START_LAYING_T = LAYING_T;
+			}
+			if (LAYING_T - START_LAYING_T > MIN_STILL_TIME_FOR_LAYING) {
+			//	printk("BMA PICK - WAS_LAYING = 1\n");
+				WAS_LAYING = 1;
+				pick_wake_triggered = 0;
+			} else {
+				WAS_LAYING = 0;
+				MOVED = 0;
+			}
+		} else {
+			START_LAYING_T = 0;
+			WAS_LAYING = 0;
+			LAST_LAYING_T = 0;
+			MOVED = 0;
+		}
+	}
+}
+
+#endif
+
 static void bma250_work_func(struct work_struct *work)
 {
 	struct bma250_data *bma250 = container_of((struct delayed_work *)work,
@@ -1486,6 +1880,13 @@ static void bma250_work_func(struct work_struct *work)
 	data_z = ((bma250->pdata->negate_z) ? (-hw_d[bma250->pdata->axis_map_z])
 		   : (hw_d[bma250->pdata->axis_map_z]));
 
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+//	printk("BMA - x %d y %d z %d\n", data_x, data_y, data_z);
+	if ((FLICK_SLEEP_ENABLED == 1 && touchscreen_is_on()==1)||(touchscreen_is_on()==0 && PICK_WAKE_ENABLED == 1 && FLICK_WAKE_ENABLED == 1)) {
+		flick_wake_detection_snap(data_x, data_y, data_z);
+	}
+	if (PICK_WAKE_ENABLED) pick_wake_detection_non_interrupt(bma250,data_x, data_y, data_z);
+#endif
 	input_report_abs(bma250->input, ABS_X, data_x);
 	input_report_abs(bma250->input, ABS_Y, data_y);
 	input_report_abs(bma250->input, ABS_Z, data_z);
@@ -1493,6 +1894,7 @@ static void bma250_work_func(struct work_struct *work)
 	mutex_lock(&bma250->value_mutex);
 	bma250->value = acc;
 	mutex_unlock(&bma250->value_mutex);
+	//printk("BMA schedule delayed work - work_func\n");
 	schedule_delayed_work(&bma250->work, delay);
 }
 
@@ -1767,7 +2169,6 @@ static ssize_t bma250_delay_store(struct device *dev,
 	return count;
 }
 
-
 static ssize_t bma250_enable_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -1778,12 +2179,169 @@ static ssize_t bma250_enable_show(struct device *dev,
 
 }
 
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+
+static ssize_t bma250_setup_interrupt_for_wake(struct bma250_data *bma250);
+
+static ssize_t bma250_f2w_sensitivity_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	size_t count = 0;
+
+	count += sprintf(buf, "%d\n", FLICK_WAKE_SENSITIVITY);
+
+	return count;
+}
+
+static ssize_t bma250_f2w_sensitivity_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
+		if (FLICK_WAKE_SENSITIVITY != buf[0] - '0') {
+			FLICK_WAKE_SENSITIVITY = buf[0] - '0';
+		}
+
+	printk(KERN_INFO "BMA [FLICK_WAKE_SENSITIVITY]: %d.\n", FLICK_WAKE_SENSITIVITY);
+	bma250_setup_interrupt_for_wake(bma250);
+
+	return count;
+}
+
+static DEVICE_ATTR(f2w_sensitivity, (S_IWUSR|S_IRUGO),
+	bma250_f2w_sensitivity_show, bma250_f2w_sensitivity_store);
+
+static ssize_t bma250_f2w_sensitivity_values_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	size_t count = 0;
+
+	if (FLICK_WAKE_SENSITIVITY == 0) {
+		count += sprintf(buf, "[0] 1\n");
+	} else {
+		count += sprintf(buf, "0 [1]\n");
+	}
+
+	return count;
+}
+
+static ssize_t bma250_f2w_sensitivity_values_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
+		if (FLICK_WAKE_SENSITIVITY != buf[0] - '0') {
+			FLICK_WAKE_SENSITIVITY = buf[0] - '0';
+		}
+
+	printk(KERN_INFO "BMA [FLICK_WAKE_SENSITIVITY]: %d.\n", FLICK_WAKE_SENSITIVITY);
+	bma250_setup_interrupt_for_wake(bma250);
+
+	return count;
+}
+
+static DEVICE_ATTR(f2w_sensitivity_values, (S_IWUSR|S_IRUGO),
+	bma250_f2w_sensitivity_values_show, bma250_f2w_sensitivity_values_store);
+
+
+static ssize_t bma250_flick2wake_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	size_t count = 0;
+
+	count += sprintf(buf, "%d\n", FLICK_WAKE_ENABLED);
+
+	return count;
+}
+
+static ssize_t bma250_flick2wake_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
+		if (FLICK_WAKE_ENABLED != buf[0] - '0') {
+			FLICK_WAKE_ENABLED = buf[0] - '0';
+		}
+
+	printk(KERN_INFO "BMA [FLICK_WAKE_ENABLED]: %d.\n", FLICK_WAKE_ENABLED);
+
+	return count;
+}
+
+static DEVICE_ATTR(flick2wake, (S_IWUSR|S_IRUGO),
+	bma250_flick2wake_show, bma250_flick2wake_store);
+
+static ssize_t bma250_flick2sleep_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	size_t count = 0;
+
+	count += sprintf(buf, "%d\n", FLICK_SLEEP_ENABLED);
+
+	return count;
+}
+
+static ssize_t bma250_flick2sleep_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
+		if (FLICK_SLEEP_ENABLED != buf[0] - '0') {
+			FLICK_SLEEP_ENABLED = buf[0] - '0';
+		}
+
+	printk(KERN_INFO "BMA [FLICK_SLEEP_ENABLED]: %d.\n", FLICK_SLEEP_ENABLED);
+
+	return count;
+}
+
+static DEVICE_ATTR(flick2sleep, (S_IWUSR|S_IRUGO),
+	bma250_flick2sleep_show, bma250_flick2sleep_store);
+
+static ssize_t bma250_pick2wake_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	size_t count = 0;
+
+	count += sprintf(buf, "%d\n", PICK_WAKE_ENABLED);
+
+	return count;
+}
+
+
+static ssize_t bma250_pick2wake_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct bma250_data *bma250 = i2c_get_clientdata(client);
+
+
+	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
+		if (PICK_WAKE_ENABLED != buf[0] - '0') {
+			PICK_WAKE_ENABLED = buf[0] - '0';
+		}
+
+	printk(KERN_INFO "BMA [PICK_WAKE_ENABLED]: %d.\n", PICK_WAKE_ENABLED);
+	bma250_setup_interrupt_for_wake(bma250);
+	return count;
+}
+
+static DEVICE_ATTR(pick2wake, (S_IWUSR|S_IRUGO),
+	bma250_pick2wake_show, bma250_pick2wake_store);
+
+#endif
+
+
 static void bma250_set_enable(struct device *dev, int enable)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct bma250_data *bma250 = i2c_get_clientdata(client);
 	int pre_enable = atomic_read(&bma250->enable);
 	int i = 0;
+	
+	printk("BMA set_enable %d\n", enable);
 
 	mutex_lock(&bma250->enable_mutex);
 	if (enable) {
@@ -1798,15 +2356,23 @@ static void bma250_set_enable(struct device *dev, int enable)
 		if (pre_enable == 0) {
 			bma250_set_mode(bma250->bma250_client,
 					BMA250_MODE_NORMAL);
+			printk("BMA schedule delayed work - enable\n");
 			schedule_delayed_work(&bma250->work,
 				msecs_to_jiffies(atomic_read(&bma250->delay)));
 			atomic_set(&bma250->enable, 1);
 		}
 
 	} else {
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+		if (keep_sensor_on() == 0)
+#endif
 		if (pre_enable == 1) {
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+			suspended = 1;
+#endif
 			bma250_set_mode(bma250->bma250_client,
 					BMA250_MODE_SUSPEND);
+			//printk("BMA cancel delayed work - enable\n");
 			cancel_delayed_work_sync(&bma250->work);
 			atomic_set(&bma250->enable, 0);
 		}
@@ -1817,7 +2383,8 @@ static void bma250_set_enable(struct device *dev, int enable)
 
 		if (bma250->pdata->power_LPM)
 #endif
-			bma250->pdata->power_LPM(1);
+			if (keep_sensor_on() == 0)
+				bma250->pdata->power_LPM(1);
 	}
 
 	if ((bma250->pdata->gs_kvalue & (0x67 << 24)) != (0x67 << 24)) {
@@ -1840,6 +2407,27 @@ static void bma250_set_enable(struct device *dev, int enable)
 	mutex_unlock(&bma250->enable_mutex);
 
 }
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+struct device *gyroscope_dev = 0;
+
+extern void gyroscope_enable(int enable) {
+	if (gyroscope_dev == 0) return; // not yet inited
+	if (enable) {
+		if (PICK_WAKE_ENABLED ==1 || FLICK_SLEEP_ENABLED == 1) {
+				struct i2c_client *client = to_i2c_client(gyroscope_dev);
+				struct bma250_data *bma250 = i2c_get_clientdata(client);
+				bma250_set_enable(gyroscope_dev, 1);
+				// set delay to 66, as htc framework, so gyro sleep works fine
+				atomic_set(&bma250->delay, (unsigned int) 66);
+		}
+	} else {
+		if (PICK_WAKE_ENABLED == 0) {
+				bma250_set_enable(gyroscope_dev, 0);
+		}
+	}
+}
+#endif
+
 
 static ssize_t bma250_enable_store(struct device *dev,
 		struct device_attribute *attr,
@@ -2783,6 +3371,43 @@ static ssize_t bma250_eeprom_writing_store(struct device *dev,
 }
 
 #ifdef CONFIG_M7_CIR_ALWAYS
+ssize_t bma250_setup_interrupt_for_wake(struct bma250_data *bma250) {
+	int error;
+	    cir_flag = 1;
+
+	    if(bma250->pdata->power_LPM)
+		bma250->pdata->power_LPM(0);
+
+	    error = bma250_set_Int_Mode(bma250->bma250_client, 1);
+
+	    if (PICK_WAKE_ENABLED == 1) {
+		error += bma250_set_slope_duration(bma250->bma250_client, 0x01);
+		error += bma250_set_slope_threshold(bma250->bma250_client, 0x07); // original 0x07
+		// X and Y (1,1,0)
+		error += bma250_set_Int_Enable(bma250->bma250_client, 5, 1);
+		error += bma250_set_Int_Enable(bma250->bma250_client, 6, 1);
+		error += bma250_set_Int_Enable(bma250->bma250_client, 7, 0);
+	    } else {
+//	    error += bma250_set_slope_duration(bma250->bma250_client, 0x01);
+		error += bma250_set_slope_duration(bma250->bma250_client, 0x01); // set it higher (3 samples of slope), for being less motion sensitive...
+//	    error +  bma250_set_slope_threshold(bma250->bma250_client, 0x07); // original 0x07
+		error += bma250_set_slope_threshold(bma250->bma250_client, FLICK_WAKE_SENSITIVITY==0?140:110); // higher threshold to only detect heavy motion through interrupt, less wake
+		// only Y (0,1,0)
+		error += bma250_set_Int_Enable(bma250->bma250_client, 5, 0);
+		error += bma250_set_Int_Enable(bma250->bma250_client, 6, 1);
+		error += bma250_set_Int_Enable(bma250->bma250_client, 7, 0);
+	    }
+	    error += bma250_set_int1_pad_sel(bma250->bma250_client, PAD_SLOP);
+
+	    error += bma250_set_mode(bma250->bma250_client, BMA250_MODE_NORMAL);
+
+	    if (error)
+		return error;
+	    I("Always Ready enable = 1 \n");
+
+	return error;
+}
+
 static ssize_t bma250_enable_interrupt(struct device *dev,
 		struct device_attribute *attr,
 		const char *buf, size_t count)
@@ -2795,32 +3420,16 @@ static ssize_t bma250_enable_interrupt(struct device *dev,
 	error = strict_strtoul(buf, 10, &enable);
 		if (error)
 		return error;
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+///////////////////
+	enable = 1;
+///////////////////
+#endif
 	I("bma250_enable_interrupt, power_key_pressed = %d\n", power_key_pressed);
 	if(enable == 1 && !power_key_pressed){ 
-		
-	    cir_flag = 1;
-
-	    
-	    if(bma250->pdata->power_LPM)
-		bma250->pdata->power_LPM(0);
-	    
-	    error = bma250_set_Int_Mode(bma250->bma250_client, 1);
-
-	    error += bma250_set_slope_duration(bma250->bma250_client, 0x01);
-	    error += bma250_set_slope_threshold(bma250->bma250_client, 0x07);
-
-	    
-	    error += bma250_set_Int_Enable(bma250->bma250_client, 5, 1);
-	    error += bma250_set_Int_Enable(bma250->bma250_client, 6, 1);
-	    error += bma250_set_Int_Enable(bma250->bma250_client, 7, 0);
-	    error += bma250_set_int1_pad_sel(bma250->bma250_client, PAD_SLOP);
-
-	    error += bma250_set_mode(bma250->bma250_client, BMA250_MODE_NORMAL);
-
+	    error += bma250_setup_interrupt_for_wake(bma250);
 	    if (error)
 		return error;
-	    I("Always Ready enable = 1 \n");
-		
 	}  else if(enable == 0){
 
 	    error += bma250_set_Int_Enable(bma250->bma250_client, 5, 0);
@@ -2952,6 +3561,13 @@ static struct attribute *bma250_attributes[] = {
 #ifdef CONFIG_M7_CIR_ALWAYS
 	&dev_attr_enable_cir_interrupt.attr,
 #endif
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	&dev_attr_flick2wake.attr,
+	&dev_attr_flick2sleep.attr,
+	&dev_attr_f2w_sensitivity.attr,
+	&dev_attr_f2w_sensitivity_values.attr,
+	&dev_attr_pick2wake.attr,
+#endif
 	NULL
 };
 
@@ -2978,10 +3594,36 @@ static void bma250_irq_work_func(struct work_struct *work)
 
 	unsigned char status = 0;
 	
-	
-	
+
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+
+	// TODO try to determine if bma250_resume() should be called
+	if (FLICK_WAKE_ENABLED || PICK_WAKE_ENABLED) {
+	static struct bma250acc acc;
+	s16 data_x = 0, data_y = 0, data_z = 0;
+	s16 hw_d[3] = {0};
+
+	printk("BMA INTERRUPT \n");
+	bma250_read_accel_xyz(bma250->bma250_client, &acc);
+	hw_d[0] = acc.x + bma250->offset_buf[0];
+	hw_d[1] = acc.y + bma250->offset_buf[1];
+	hw_d[2] = acc.z + bma250->offset_buf[2];
+
+	data_x = ((bma250->pdata->negate_x) ? (-hw_d[bma250->pdata->axis_map_x])
+		   : (hw_d[bma250->pdata->axis_map_x]));
+	data_y = ((bma250->pdata->negate_y) ? (-hw_d[bma250->pdata->axis_map_y])
+		   : (hw_d[bma250->pdata->axis_map_y]));
+	data_z = ((bma250->pdata->negate_z) ? (-hw_d[bma250->pdata->axis_map_z])
+		   : (hw_d[bma250->pdata->axis_map_z]));
+		//printk("BMA - x %d y %d z %d\n", data_x, data_y, data_z);
+	if (FLICK_WAKE_ENABLED == 1 && PICK_WAKE_ENABLED == 0) flick_wake_detection_snap_irq(data_x, data_y, data_z);
+//	if (PICK_WAKE_ENABLED) pick_wake_detection(bma250,data_x, data_y, data_z);
+	}
+#endif
+
 	bma250_get_interruptstatus1(bma250->bma250_client, &status);
 	I("bma250_irq_work_func, status = 0x%x\n", status);
+#if 0
 	input_report_rel(bma250->input_cir,
 		SLOP_INTERRUPT,
 		SLOPE_INTERRUPT_X_NEGATIVE_HAPPENED);
@@ -2995,6 +3637,7 @@ static void bma250_irq_work_func(struct work_struct *work)
 		SLOP_INTERRUPT,
 		SLOPE_INTERRUPT_Y_HAPPENED);
 	input_sync(bma250->input_cir);
+#endif
 	enable_irq(bma250->IRQ);
 
 }
@@ -3191,6 +3834,9 @@ static int bma250_probe(struct i2c_client *client,
 			&bma250_attribute_group);
 	if (err < 0)
 		goto error_sysfs;
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	gyroscope_dev = data->g_sensor_dev;
+#endif
 
 #else 
 
@@ -3238,6 +3884,7 @@ exit:
 	return err;
 }
 
+
 #ifdef CONFIG_HAS_EARLYSUSPEND
 static void bma250_early_suspend(struct early_suspend *h)
 {
@@ -3245,11 +3892,16 @@ static void bma250_early_suspend(struct early_suspend *h)
 		container_of(h, struct bma250_data, early_suspend);
 
 	D("%s++\n", __func__);
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	if (keep_sensor_on()) return;
+	suspended = 1;
+#endif
 
 	mutex_lock(&data->enable_mutex);
 	if (atomic_read(&data->enable) == 1) {
 	    I("suspend mode\n");
 	    bma250_set_mode(data->bma250_client, BMA250_MODE_SUSPEND);
+	    printk("BMA cancel delayed work - early suspend\n");
 	    cancel_delayed_work_sync(&data->work);
 	}
 	mutex_unlock(&data->enable_mutex);
@@ -3263,17 +3915,25 @@ static void bma250_late_resume(struct early_suspend *h)
 
 	D("%s++\n", __func__);
 
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	if (suspended == 0) return 0;
+#endif
+
 	mutex_lock(&data->enable_mutex);
 #ifdef CONFIG_M7_CIR_ALWAYS
-	
 	power_key_pressed = 0;
 #endif
 	if (atomic_read(&data->enable) == 1) {
 		bma250_set_mode(data->bma250_client, BMA250_MODE_NORMAL);
+		printk("BMA schedule delayed work - late resume\n");
 		schedule_delayed_work(&data->work,
 				msecs_to_jiffies(atomic_read(&data->delay)));
 	}
 	mutex_unlock(&data->enable_mutex);
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	suspended = 0;
+#endif
+
 }
 #endif
 
@@ -3293,16 +3953,24 @@ static int __devexit bma250_remove(struct i2c_client *client)
 }
 #ifdef CONFIG_PM
 
+
 static int bma250_suspend(struct i2c_client *client, pm_message_t mesg)
 {
 	struct bma250_data *data = i2c_get_clientdata(client);
 
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	if (keep_sensor_on()) return 0;
+	suspended = 1;
+#endif
 	D("%s++\n", __func__);
+
+
 
 	mutex_lock(&data->enable_mutex);
 	if (atomic_read(&data->enable) == 1) {
 	    I("suspend mode\n");
 		bma250_set_mode(data->bma250_client, BMA250_MODE_SUSPEND);
+		printk("BMA cancel delayed work - suspend\n");
 		cancel_delayed_work_sync(&data->work);
 	}
 	mutex_unlock(&data->enable_mutex);
@@ -3314,8 +3982,11 @@ static int bma250_suspend(struct i2c_client *client, pm_message_t mesg)
 
 	if (data && (data->pdata->power_LPM)){
 #endif
-	    I("suspend + power_LPM\n");
-		data->pdata->power_LPM(1);
+		if (keep_sensor_on() == 0)
+		{
+			I("suspend + power_LPM\n");
+			data->pdata->power_LPM(1);
+		}
 	}
 
 	return 0;
@@ -3325,11 +3996,13 @@ static int bma250_resume(struct i2c_client *client)
 {
 	struct bma250_data *data = i2c_get_clientdata(client);
 
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	if (suspended == 0) return 0;
+#endif
 	D("%s++\n", __func__);
 
 	mutex_lock(&data->enable_mutex);
 #ifdef CONFIG_M7_CIR_ALWAYS
-	
 	power_key_pressed = 0;
 	I("bma250_resume, power_key_pressed = %d\n", power_key_pressed);
 #endif
@@ -3340,6 +4013,9 @@ static int bma250_resume(struct i2c_client *client)
 				msecs_to_jiffies(atomic_read(&data->delay)));
 	}
 	mutex_unlock(&data->enable_mutex);
+#ifdef CONFIG_BMA250_WAKE_OPTIONS
+	suspended = 0;
+#endif
 
 	return 0;
 }
