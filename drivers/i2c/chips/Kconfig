@@ -76,6 +76,13 @@ config BOSCH_BMA250_ENABLE_INT2
 	  If you say yes here you get INT2 support for Bosch Sensortec's
 	  acceleration sensors BMA250.
 
+config BMA250_WAKE_OPTIONS
+	tristate "BMA250 acceleration sensor wake options support"
+	depends on BOSCH_BMA250=y
+	help
+	  If you say yes here you get Wake option support for
+	  acceleration sensors BMA250.
+
 config SENSORS_BMA250
 	tristate "BMA250 acceleration sensor support"
 	depends on I2C=y
