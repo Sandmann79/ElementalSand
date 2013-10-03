@@ -14,6 +14,7 @@
  * GNU General Public License for more details.
  */
 #include <mach/board.h>
+#include <mach/board_htc.h>
 #include <asm/setup.h>
 #include <linux/mtd/nand.h>
 #include <linux/module.h>
@@ -459,6 +460,22 @@ __setup("kernelflag=", kernel_flag_init);
 unsigned long get_kernel_flag(void)
 {
 	return kernel_flag;
+}
+
+static unsigned long debug_flag = 0;
+int __init debug_flag_init(char *s)
+{
+	int ret;
+	ret = strict_strtoul(s, 16, &debug_flag);
+	if (ret != 0)
+		pr_err("%s: debug flag cannot be parsed from `%s'\r\n", __func__, s);
+	return 1;
+}
+__setup("debugflag=", debug_flag_init);
+
+unsigned long get_debug_flag(void)
+{
+	return debug_flag;
 }
 
 static char *sku_color_tag = NULL;
