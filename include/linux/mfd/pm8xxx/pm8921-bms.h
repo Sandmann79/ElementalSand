@@ -117,6 +117,7 @@ int pm8921_bms_dump_all(void);
 #ifdef CONFIG_HTC_BATT_8960
 int pm8921_bms_get_batt_current(int *result);
 
+int pm8921_store_hw_reset_reason(int is_hw_reset);
 int pm8921_bms_get_batt_soc(int *result);
 int pm8921_bms_get_batt_cc(int *result);
 int pm8921_bms_get_attr_text(char *buf, int size);
@@ -174,6 +175,12 @@ static inline int pm8921_bms_get_batt_current(int *result)
 {
 	return -ENXIO;
 }
+
+static inline int pm8921_store_hw_reset_reason(int is_hw_reset)
+{
+	return -ENXIO;
+}
+
 static inline int pm8921_bms_get_batt_soc(int *result)
 {
 	return -ENXIO;
