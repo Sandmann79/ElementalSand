@@ -5,6 +5,7 @@
 
  * (C) Copyright 2011 Bosch Sensortec GmbH
  * All Rights Reserved
+ * (C) Copyright 2013 Illes Pal Zoltan - Gyrowake modifications
  */
 
 
@@ -1506,7 +1507,7 @@ extern void flick2wake_setdev(struct input_dev * input_device) {
 EXPORT_SYMBOL(flick2wake_setdev);
 
 static void flick2wake_presspwr(struct work_struct * flick2wake_presspwr_work) {
-	if ( touchscreen_is_on()==0 && power_key_check_in_pocket(1) ) return; // don't wake if in pocket
+	if ( touchscreen_is_on()==0 && power_key_check_in_pocket(0) ) return; // don't wake if in pocket
 
 	if (!mutex_trylock(&pwrlock))
 	    return;
@@ -1627,7 +1628,7 @@ static void pick2wake_count(struct work_struct * pick2wake_count_work) {
 	unsigned int calc_time = 0;
 	printk("BMA pick2wake_count - check ts on and pwp...\n");
 
-	if ( touchscreen_is_on()==0 && power_key_check_in_pocket(1) ) return; // don't wake if in pocket
+	if ( touchscreen_is_on()==0 && power_key_check_in_pocket(0) ) return; // don't wake if in pocket
 
 	printk("BMA pick2wake_count\n");
 	if (!mutex_trylock(&picklock))
