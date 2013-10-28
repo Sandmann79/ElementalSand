@@ -123,6 +123,9 @@ EXPORT_SYMBOL(msm_set_restart_mode);
 
 static unsigned mdm2ap_errfatal_restart;
 static unsigned ap2mdm_pmic_reset_n_gpio = -1;
+static unsigned ap2qsc_pmic_pwr_en_value;
+static unsigned ap2qsc_pmic_pwr_en_gpio = -1;
+static unsigned ap2qsc_pmic_soft_reset_gpio = -1;
 
 void set_mdm2ap_errfatal_restart_flag(unsigned flag)
 {
@@ -132,6 +135,17 @@ void set_mdm2ap_errfatal_restart_flag(unsigned flag)
 void register_ap2mdm_pmic_reset_n_gpio(unsigned gpio)
 {
 	ap2mdm_pmic_reset_n_gpio = gpio;
+}
+
+void register_ap2qsc_pmic_pwr_en_gpio(unsigned gpio, unsigned enable_value)
+{
+	ap2qsc_pmic_pwr_en_gpio = gpio;
+	ap2qsc_pmic_pwr_en_value = enable_value;
+}
+
+void register_ap2qsc_pmic_soft_reset_gpio(unsigned gpio)
+{
+	ap2qsc_pmic_soft_reset_gpio = gpio;
 }
 
 #define MDM_HOLD_TIME			2000
@@ -149,6 +163,25 @@ static void turn_off_mdm_power(void)
 			mdelay(MDM_MODEM_DELTA);
 		}
 		printk(KERN_CRIT "Power off MDM down...\n");
+	}
+}
+
+static void turn_off_qsc_power(void)
+{
+	if (gpio_is_valid(ap2qsc_pmic_pwr_en_gpio))
+	{
+		if (gpio_is_valid(ap2qsc_pmic_soft_reset_gpio))
+		{
+			pr_info("Discharging QSC...\n");
+			gpio_direction_output(ap2qsc_pmic_soft_reset_gpio, 1);
+			mdelay(500);
+		}
+
+		printk(KERN_CRIT "Powering off QSC...\n");
+		gpio_direction_output(ap2qsc_pmic_pwr_en_gpio, !ap2qsc_pmic_pwr_en_value);
+		pet_watchdog();
+		mdelay(1000);
+		pet_watchdog();
 	}
 }
 
